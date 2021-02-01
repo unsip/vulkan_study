@@ -51,8 +51,8 @@ static std::vector<char> load_shader(const std::string& filename)
 
 struct QueueFamilyIndices
 {
-    std::optional<uint32_t> graphicsFamily;
-    std::optional<uint32_t> presentFamily;
+    std::optional<std::uint32_t> graphicsFamily;
+    std::optional<std::uint32_t> presentFamily;
     bool isComplete() { return graphicsFamily.has_value() && presentFamily.has_value(); }
 };
 
@@ -94,6 +94,7 @@ private:
     std::vector<VkFence>            m_in_flight_fences;
     std::vector<VkFence>            m_imgs_in_flight;
     std::size_t                     m_curr_frame = 0;
+    bool                            m_framebuffer_resized = false;
 
 public:
     TriangleApp(std::size_t width, std::size_t height)
@@ -109,12 +110,20 @@ public:
     }
 
 private:
+    static void framebufferResizeCallback(GLFWwindow* window, int, int)
+    {
+        auto app = reinterpret_cast<TriangleApp*>(glfwGetWindowUserPointer(window));
+        app->m_framebuffer_resized = true;
+    }
+
     void initWindow()
     {
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);   // Suppress OpenGL context.
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);     // Disable window resizing.
         m_window = glfwCreateWindow(m_width, m_height, "Vulkan Triangle", nullptr, nullptr);
+        glfwSetWindowUserPointer(m_window, this);
+        glfwSetFramebufferSizeCallback(m_window, framebufferResizeCallback);
     }
 
     void initVulkan()
@@ -148,7 +157,7 @@ private:
     {
         vkWaitForFences(m_dev, 1, &m_in_flight_fences[m_curr_frame], VK_TRUE, UINT64_MAX);
         std::uint32_t img_idx;
-        vkAcquireNextImageKHR(
+        VkResult res = vkAcquireNextImageKHR(
             m_dev
           , m_swapchain
           , UINT64_MAX
@@ -156,6 +165,14 @@ private:
           , VK_NULL_HANDLE
           , &img_idx
         );
+
+        if (res == VK_ERROR_OUT_OF_DATE_KHR)
+        {
+            recreateSwapChain();
+            return;
+        }
+        else if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
+            throw std::runtime_error("Failed to acquire swapchain image!");
 
         // Check if a previous frame is using this image (i.e. there is its fence to wait on).
         if (m_imgs_in_flight[img_idx] != VK_NULL_HANDLE)
@@ -191,13 +208,21 @@ private:
         present_info.swapchainCount = 1;
         present_info.pSwapchains = swapchains;
         present_info.pImageIndices = &img_idx;
-        vkQueuePresentKHR(m_present_queue, &present_info);
+        res = vkQueuePresentKHR(m_present_queue, &present_info);
+        if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR || m_framebuffer_resized)
+        {
+            m_framebuffer_resized = false;
+            recreateSwapChain();
+        }
+        else if (res != VK_SUCCESS)
+            throw std::runtime_error("Failed to present swapchain image!");
 
         m_curr_frame = (m_curr_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
     void cleanup()
     {
+        cleanupSwapchain();
         for (std::size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
         {
             vkDestroySemaphore(m_dev, m_render_finished_semaphores[i], nullptr);
@@ -205,19 +230,24 @@ private:
             vkDestroyFence(m_dev, m_in_flight_fences[i], nullptr);
         }
         vkDestroyCommandPool(m_dev, m_cmd_pool, nullptr);
+        vkDestroyDevice(m_dev, nullptr);
+        vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
+        vkDestroyInstance(m_instance, nullptr);
+        glfwDestroyWindow(m_window);
+        glfwTerminate();
+    }
+
+    void cleanupSwapchain()
+    {
         for (auto framebuffer : m_swapchain_framebuffers)
             vkDestroyFramebuffer(m_dev, framebuffer, nullptr);
+        vkFreeCommandBuffers(m_dev, m_cmd_pool, static_cast<std::uint32_t>(m_cmd_buffers.size()), m_cmd_buffers.data());
         vkDestroyPipeline(m_dev, m_pipeline, nullptr);
         vkDestroyPipelineLayout(m_dev, m_pipeline_layout, nullptr);
         vkDestroyRenderPass(m_dev, m_render_pass, nullptr);
         for (auto img_view : m_swapchain_img_views)
             vkDestroyImageView(m_dev, img_view, nullptr);
         vkDestroySwapchainKHR(m_dev, m_swapchain, nullptr);
-        vkDestroyDevice(m_dev, nullptr);
-        vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
-        vkDestroyInstance(m_instance, nullptr);
-        glfwDestroyWindow(m_window);
-        glfwTerminate();
     }
 
     void createCommandBuffers()
@@ -227,7 +257,7 @@ private:
         alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         alloc_info.commandPool = m_cmd_pool;
         alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        alloc_info.commandBufferCount = static_cast<uint32_t>(m_cmd_buffers.size());
+        alloc_info.commandBufferCount = static_cast<std::uint32_t>(m_cmd_buffers.size());
 
         if (vkAllocateCommandBuffers(m_dev, &alloc_info, m_cmd_buffers.data()) != VK_SUCCESS)
             throw std::runtime_error("Failed to allocate command buffers!");
@@ -427,11 +457,11 @@ private:
         QueueFamilyIndices indices = findQueueFamilies(m_phy_dev);
 
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-        std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        std::set<std::uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
 
         float queuePriority = 1.0f;
 
-        for (uint32_t queueFamily : uniqueQueueFamilies) {
+        for (std::uint32_t queueFamily : uniqueQueueFamilies) {
             VkDeviceQueueCreateInfo queueCreateInfo{};
             queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
             queueCreateInfo.queueFamilyIndex = queueFamily;
@@ -444,16 +474,16 @@ private:
         VkDeviceCreateInfo createInfo {};
 
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-        createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
+        createInfo.queueCreateInfoCount = static_cast<std::uint32_t>(queueCreateInfos.size());
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
         createInfo.queueCreateInfoCount = 1;
         createInfo.pEnabledFeatures = &deviceFeatures;
-        createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+        createInfo.enabledExtensionCount = static_cast<std::uint32_t>(deviceExtensions.size());
         createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
         if (enableValidationLayers)
         {
-            createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+            createInfo.enabledLayerCount = static_cast<std::uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
         }
         else
@@ -536,7 +566,7 @@ private:
         createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         createInfo.codeSize = code.size();
         // Default std::vector allocator satisfies alignment requirements.
-        createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+        createInfo.pCode = reinterpret_cast<const std::uint32_t*>(code.data());
 
         VkShaderModule shaderModule;
         if (vkCreateShaderModule(m_dev, &createInfo, nullptr, &shaderModule) != VK_SUCCESS)
@@ -559,7 +589,7 @@ private:
         VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
         VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
 
-        uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
+        std::uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
         if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount)
             imageCount = swapChainSupport.capabilities.maxImageCount;
 
@@ -574,7 +604,7 @@ private:
         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
         QueueFamilyIndices indices = findQueueFamilies(m_phy_dev);
-        uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        std::uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
 
         if (indices.graphicsFamily != indices.presentFamily)
         {
@@ -607,7 +637,7 @@ private:
 
     void pickPhysicalDevice()
     {
-        uint32_t devCnt = 0;
+        std::uint32_t devCnt = 0;
         vkEnumeratePhysicalDevices(m_instance, &devCnt, nullptr);
 
         if (devCnt == 0)
@@ -644,7 +674,7 @@ private:
 
     bool checkDeviceExtensionsSupport(VkPhysicalDevice dev)
     {
-        uint32_t extensionCount;
+        std::uint32_t extensionCount;
         vkEnumerateDeviceExtensionProperties(dev, nullptr, &extensionCount, nullptr);
 
         std::vector<VkExtensionProperties> availableExtensions(extensionCount);
@@ -666,7 +696,7 @@ private:
         int width, height;
         glfwGetFramebufferSize(m_window, &width, &height);
 
-        VkExtent2D actualExtent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
+        VkExtent2D actualExtent = { static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height) };
         actualExtent.width = std::max(
             capabilities.minImageExtent.width
           , std::min(capabilities.maxImageExtent.width , actualExtent.width)
@@ -701,7 +731,7 @@ private:
     // TODO: Remove reference to global vars.
     bool checkValidationLayerSupport()
     {
-        uint32_t layerCnt;
+        std::uint32_t layerCnt;
         vkEnumerateInstanceLayerProperties(&layerCnt, nullptr);
         std::vector<VkLayerProperties> availableLayers(layerCnt);
         vkEnumerateInstanceLayerProperties(&layerCnt, availableLayers.data());
@@ -742,20 +772,20 @@ private:
         VkInstanceCreateInfo createInfo;
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         createInfo.pApplicationInfo = &appInfo;
-        uint32_t glfwExtensionCount = 0;
+        std::uint32_t glfwExtensionCount = 0;
         const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
         createInfo.enabledExtensionCount = glfwExtensionCount;
         createInfo.ppEnabledExtensionNames = glfwExtensions;
 
         if (enableValidationLayers)
         {
-            createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+            createInfo.enabledLayerCount = static_cast<std::uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
         }
         else
             createInfo.enabledLayerCount = 0;
 
-        uint32_t extCnt = 0;
+        std::uint32_t extCnt = 0;
         std::vector<VkExtensionProperties> extensions(extCnt);
         vkEnumerateInstanceExtensionProperties(nullptr, &extCnt, extensions.data());
 
@@ -771,7 +801,7 @@ private:
     {
         QueueFamilyIndices indices;
 
-        uint32_t queueFamilyCount = 0;
+        std::uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(dev, &queueFamilyCount, nullptr);
         std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
         vkGetPhysicalDeviceQueueFamilyProperties(dev, &queueFamilyCount, queueFamilies.data());
@@ -802,7 +832,7 @@ private:
     {
         SwapChainSupportDetails details;
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(dev, m_surface, &details.capabilities);
-        uint32_t formatCount;
+        std::uint32_t formatCount;
         vkGetPhysicalDeviceSurfaceFormatsKHR(dev, m_surface, &formatCount, nullptr);
 
         if (formatCount != 0)
@@ -811,7 +841,7 @@ private:
             vkGetPhysicalDeviceSurfaceFormatsKHR(dev, m_surface, &formatCount, details.formats.data());
         }
 
-        uint32_t presentModeCount;
+        std::uint32_t presentModeCount;
         vkGetPhysicalDeviceSurfacePresentModesKHR(dev, m_surface, &presentModeCount, nullptr);
 
         if (presentModeCount != 0)
@@ -821,6 +851,26 @@ private:
         }
 
         return details;
+    }
+
+    void recreateSwapChain()
+    {
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(m_window, &width, &height);
+        while (width == 0 || height == 0)
+        {
+            glfwGetFramebufferSize(m_window, &width, &height);
+            glfwWaitEvents();
+        }
+
+        vkDeviceWaitIdle(m_dev);
+        cleanupSwapchain();
+        createSwapChain();
+        createImageViews();
+        createRenderPass();
+        createGraphicsPipeline();
+        createFramebuffers();
+        createCommandBuffers();
     }
 };
 } // anonymous namespace
